@@ -12,6 +12,9 @@ use syn::{
     ItemForeignMod,
     ForeignItem,
     ForeignItemFn,
+    Pat,
+    PatType,
+    PatIdent,
     Signature,
     FnArg,
     Meta,
@@ -60,14 +63,19 @@ pub fn parse_dll_name(metadata: TokenStream) -> Result<(String, Option<Expr>)> {
 }
 
 pub fn parse_extern_block(dll_name: &str, load_library_ex_flags: Option<&Expr>, input: TokenStream) -> Result<proc_macro2::TokenStream> {
+    // Get the real name of the windows-dll name. The name can be changed in the
+    // user's Cargo.toml!
     let crate_name = crate_name("windows-dll").unwrap_or_else(|_| "windows_dll".to_string());
     let crate_name = Ident::new(&crate_name, Span::call_site());
 
+    // Parse the extern block the dll macro is attached to.
     let ItemForeignMod { abi, items, .. } = parse(input)?;
 
     let functions = items.into_iter().map(|i| {
         match i {
             ForeignItem::Fn(ForeignItemFn { attrs, vis, sig, .. }) => {
+                // Extract the override name/ordinal from the attributes, if
+                // present.
                 let link_attr = attrs.iter().find_map(|attr| {
                     let meta = attr.parse_meta().ok()?;
                     if meta.path().is_ident("link_ordinal") {
@@ -85,33 +93,35 @@ pub fn parse_extern_block(dll_name: &str, load_library_ex_flags: Option<&Expr>, 
                     }
                 });
 
-                let fallible_attr = attrs.iter().find(|attr| {
+                // Check if this function has the fallible attribute.
+                let fallible_attr = attrs.iter().any(|attr| {
                     match attr.parse_meta() {
                         Ok(meta) => meta.path().is_ident("fallible"),
                         Err(_) => false,
                     }
-                }).is_some();
+                });
 
-                let attrs = attrs.into_iter().filter_map(|attr| {
+                // Get all the "real" attributes (e.g. the attributes that don't
+                // belong to us) so we can pass them down.
+                let attrs = attrs.into_iter().filter(|attr| {
                         match attr.parse_meta() {
                             Ok(meta) => {
                                 let path = meta.path();
-                                if path.is_ident("link_ordinal") || path.is_ident("link_name") || path.is_ident("fallible") {
-                                    None
-                                } else {
-                                    Some(attr)
-                                }
+                                // We want to filter out our attributes.
+                                !(
+                                    path.is_ident("link_ordinal") ||
+                                    path.is_ident("link_name") ||
+                                    path.is_ident("fallible"))
                             }
-                            Err(_) => {
-                                Some(attr)
-                            }
+                            Err(_) => true
                         }
                     });
 
+                // Extract the arguments from the function, as we'll need them
+                // to generate the wrapper.
                 let Signature { ident, inputs, output, .. } = &sig;
 
                 let wide_dll_name = dll_name.encode_utf16().chain(once(0));
-                use syn::{Pat, PatType, PatIdent};
                 let argument_names = inputs.iter().map(|i| {
                     match i {
                         FnArg::Typed(PatType { pat, .. }) => match &**pat {
