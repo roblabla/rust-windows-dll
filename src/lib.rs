@@ -1,5 +1,8 @@
+pub use windows_dll_codegen::dll;
+
+// Those are internal implementation details. Please do not rely on them.
+#[doc(hidden)]
 pub use {
-    windows_dll_codegen::dll,
     once_cell,
 };
 
